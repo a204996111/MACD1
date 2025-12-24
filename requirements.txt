@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+pandas
+yfinance
+backtesting
+jinja2
+pydantic
+scipy
+bokeh==2.4.3
