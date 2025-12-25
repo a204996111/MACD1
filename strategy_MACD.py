@@ -14,44 +14,57 @@ class StrategyParams(BaseModel):
     macd_fast: int = 12
     macd_slow: int = 26
     macd_signal: int = 9
-    # 新增均線參數
     ma1_period: int = 5
     ma2_period: int = 10
     ma3_period: int = 20
+    initial_cash: int = 100000
+    commission_discount: float = 10.0
+    # 修改：只保留模式與最大檔數
+    trade_mode: str = "all"  # "all" or "fixed"
+    max_pos: int = 1         # 最大同時持倉筆數 (預設1)
 
-# 2. 策略邏輯 (維持黃金交叉邏輯)
+# 2. 策略邏輯
 class MyMacdStrategy(Strategy):
     fast = 12
     slow = 26
     signal = 9
     sl_pct = 0.05
     tp_pct = 0.10
+    trade_mode = "all"
+    max_pos = 1
     
     def init(self):
         close = pd.Series(self.data.Close)
         ema_f = close.ewm(span=self.fast, adjust=False).mean()
         ema_s = close.ewm(span=self.slow, adjust=False).mean()
-        
         self.dif = self.I(lambda: ema_f - ema_s, name='DIF')
         self.dea = self.I(lambda: pd.Series(self.dif).ewm(span=self.signal, adjust=False).mean(), name='DEA')
         self.hist = self.I(lambda: self.dif - self.dea, name='HIST')
 
     def next(self):
+        dif = self.dif
+        dea = self.dea
         price = self.data.Close[-1]
-        dif_curr = self.dif[-1]
-        dif_prev = self.dif[-2]
-        dea_curr = self.dea[-1]
-        dea_prev = self.dea[-2]
+        
+        if len(dif) < 2: return
 
-        # 黃金交叉 (買進)
-        if not self.position:
-            if dif_prev < dea_prev and dif_curr > dea_curr:
-                self.buy(sl=price*(1-self.sl_pct), tp=price*(1+self.tp_pct))
+        # 進場：黃金交叉
+        if dif[-2] < dea[-2] and dif[-1] > dea[-1]:
+            # ★★★ 資金管理邏輯 ★★★
+            if self.trade_mode == "fixed":
+                # 固定 1000 股模式
+                # 檢查：目前的持倉筆數 < 設定的最大筆數，才准買
+                if len(self.trades) < self.max_pos:
+                    self.buy(size=1000, sl=price*(1-self.sl_pct), tp=price*(1+self.tp_pct))
+            else:
+                # 梭哈模式：不限制筆數(反正錢用完就買不了)，直接用剩餘資金買進
+                # 這裡加個簡單判斷，如果已經有倉位就不再買(避免零錢加碼)，純粹做一筆 All in
+                if len(self.trades) == 0:
+                    self.buy(sl=price*(1-self.sl_pct), tp=price*(1+self.tp_pct))
 
-        # 死亡交叉 (賣出)
-        else:
-            if dif_prev > dea_prev and dif_curr < dea_curr:
-                self.position.close()
+        # 出場：死亡交叉 (全部平倉)
+        if dif[-2] > dea[-2] and dif[-1] < dea[-1]:
+            self.position.close()
 
 # 3. 執行分析
 def run_simple_analysis(params: StrategyParams):
@@ -60,7 +73,14 @@ def run_simple_analysis(params: StrategyParams):
     if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
     df = df.dropna()
 
-    bt = Backtest(df, MyMacdStrategy, cash=100_000, commission=.002)
+    fee_rate = 0.001425 * (params.commission_discount / 10)
+    tax_rate = 0.003
+    approx_comm = fee_rate + (tax_rate / 2)
+
+    MyMacdStrategy.trade_mode = params.trade_mode
+    MyMacdStrategy.max_pos = params.max_pos
+
+    bt = Backtest(df, MyMacdStrategy, cash=params.initial_cash, commission=approx_comm)
     stats = bt.run(
         fast=params.macd_fast, slow=params.macd_slow, signal=params.macd_signal,
         sl_pct=params.sl_pct, tp_pct=params.tp_pct
@@ -70,46 +90,60 @@ def run_simple_analysis(params: StrategyParams):
     trades_df = stats['_trades']
     trade_markers = []
     trade_list = []
+    current_equity = params.initial_cash
+
     if not trades_df.empty:
         for i, row in trades_df.iterrows():
-            trade_markers.append({"date": str(row['EntryTime'].date()), "price": row['EntryPrice'], "type": "buy"})
-            trade_markers.append({"date": str(row['ExitTime'].date()), "price": row['ExitPrice'], "type": "sell"})
+            entry_price = row['EntryPrice']
+            exit_price = row['ExitPrice']
+            size = row['Size'] 
+
+            cost_buy = entry_price * size * fee_rate
+            cost_sell = exit_price * size * (fee_rate + tax_rate)
+            total_cost = int(cost_buy + cost_sell)
+
+            gross_profit = (exit_price - entry_price) * size
+            net_pnl = int(gross_profit - total_cost)
+            current_equity += net_pnl
+            duration_days = row['Duration'].days
+
+            trade_markers.append({"date": str(row['EntryTime'].date()), "price": entry_price, "type": "buy"})
+            trade_markers.append({"date": str(row['ExitTime'].date()), "price": exit_price, "type": "sell"})
+            
             trade_list.append({
                 "entry_date": str(row['EntryTime'].date()),
-                "entry_price": round(row['EntryPrice'], 2),
+                "entry_price": round(entry_price, 2),
                 "exit_date": str(row['ExitTime'].date()),
-                "exit_price": round(row['ExitPrice'], 2),
-                "pl": round(row['PnL'], 0),
-                "return": round(row['ReturnPct'] * 100, 2),
-                "duration": str(row['Duration'].days) + " 天"
+                "exit_price": round(exit_price, 2),
+                "duration": f"{duration_days} 天",
+                "cost": total_cost,
+                "pl": net_pnl,
+                "return": round((net_pnl / (entry_price * size)) * 100, 2),
+                "equity": int(current_equity)
             })
 
-    # 計算 MACD 與 均線數據 供前端繪圖
+    # 指標與曲線
     close = df['Close']
-    
-    # MACD
+    ma1 = close.rolling(window=params.ma1_period).mean()
+    ma2 = close.rolling(window=params.ma2_period).mean()
+    ma3 = close.rolling(window=params.ma3_period).mean()
     ema_f = close.ewm(span=params.macd_fast, adjust=False).mean()
     ema_s = close.ewm(span=params.macd_slow, adjust=False).mean()
     dif = ema_f - ema_s
     dea = dif.ewm(span=params.macd_signal, adjust=False).mean()
     hist = dif - dea
 
-    # 均線 (MA)
-    ma1 = close.rolling(window=params.ma1_period).mean()
-    ma2 = close.rolling(window=params.ma2_period).mean()
-    ma3 = close.rolling(window=params.ma3_period).mean()
-
-    sharpe = stats['Sharpe Ratio']
-    sharpe = round(float(sharpe), 2) if not (np.isnan(sharpe) or np.isinf(sharpe)) else 0.0
+    equity_curve = stats['_equity_curve']['Equity']
+    if len(equity_curve) > len(df): equity_curve = equity_curve.iloc[-len(df):]
     
     result = {
         "return": round(float(stats['Return [%]']), 2),
         "mdd": round(float(stats['Max. Drawdown [%]']), 2),
-        "sharpe": sharpe,
+        "sharpe": round(float(stats['Sharpe Ratio']), 2) if not np.isnan(stats['Sharpe Ratio']) else 0.0,
         "win_rate": round(float(stats['Win Rate [%]']), 2),
         "pl_ratio": round(float(stats['Profit Factor']), 2) if not np.isnan(stats['Profit Factor']) else 0.0,
         "trades": int(stats['# Trades']),
-        "equity": stats['_equity_curve']['Equity'].apply(float).tolist()
+        "equity": equity_curve.apply(float).tolist()
     }
 
     return {
@@ -118,11 +152,9 @@ def run_simple_analysis(params: StrategyParams):
         "high": df['High'].tolist(),
         "low": df['Low'].tolist(),
         "close": df['Close'].tolist(),
-        # 回傳均線數據 (處理 NaN 為 None 以便前端不繪製)
         "ma1": ma1.where(pd.notnull(ma1), None).tolist(),
         "ma2": ma2.where(pd.notnull(ma2), None).tolist(),
         "ma3": ma3.where(pd.notnull(ma3), None).tolist(),
-        
         "macd_dif": dif.replace({np.nan: None}).tolist(),
         "macd_dea": dea.replace({np.nan: None}).tolist(),
         "macd_hist": hist.replace({np.nan: None}).tolist(),

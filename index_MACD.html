@@ -1,0 +1,460 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <title>MACD Pro 回測</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/echarts/dist/echarts.min.js"></script>
+
+    <style>
+        :root {
+            --bg-body: #f8f9fa; --bg-card: #ffffff; --text-main: #333333; --text-muted: #6c757d;
+            --border-color: #dee2e6; --input-bg: #ffffff; --input-border: #ced4da; --input-text: #495057;
+            --chart-grid: #e0e0e0;
+        }
+        [data-theme="dark"] {
+            --bg-body: #121212; --bg-card: #1e1e1e; --text-main: #e0e0e0; --text-muted: #adb5bd;
+            --border-color: #343a40; --input-bg: #2b2b2b; --input-border: #495057; --input-text: #e0e0e0;
+            --chart-grid: #333333;
+        }
+        body { background-color: var(--bg-body); color: var(--text-main); transition: background-color 0.3s, color 0.3s; }
+        .card { background-color: var(--bg-card); border: 1px solid var(--border-color); border-radius: 12px; margin-bottom: 24px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); }
+        h5, .metric-title { color: var(--text-main) !important; }
+        .text-muted { color: var(--text-muted) !important; }
+        .form-control, .form-select { background-color: var(--input-bg); border-color: var(--input-border); color: var(--input-text); }
+        .metric-value { font-size: 1.6rem; font-weight: 800; color: #0d6efd; }
+        .text-win { color: #dc3545 !important; font-weight: bold; } 
+        .text-loss { color: #198754 !important; font-weight: bold; }
+        .btn-period { font-size: 0.8rem; padding: 2px 8px; }
+
+        /* 圖表懸浮資訊列 */
+        .chart-overlay {
+            position: absolute; left: 50px; z-index: 10;
+            font-family: 'Consolas', 'Monaco', monospace; font-size: 13px;
+            pointer-events: none;
+            background: rgba(var(--bg-card), 0.75); padding: 2px 8px; border-radius: 4px;
+            border: 1px solid var(--border-color);
+        }
+        #main-info { top: 5px; }
+        #sub-info { top: 72%; }
+        
+        .info-item { display: inline-block; white-space: nowrap; margin-right: 12px; }
+        .icon-link-group .btn:hover { transform: translateY(-3px); transition: transform 0.2s; }
+
+        /* 表格強制置中 */
+        .table th, .table td { text-align: center !important; vertical-align: middle !important; }
+    </style>
+</head>
+<body>
+
+<nav class="navbar px-4 py-2 d-flex justify-content-between align-items-center" style="border-bottom: 1px solid var(--border-color);">
+    <span class="h5 mb-0 fw-bold">MACD Pro 回測</span>
+    <button class="btn btn-outline-secondary btn-sm" onclick="toggleTheme()">🌗 切換模式</button>
+</nav>
+
+<div class="container-fluid py-4">
+    <div class="row">
+        <div class="col-md-3">
+            <div class="card p-4">
+                <h5 class="mb-3">⚙️ 策略參數</h5>
+                <form action="/" method="get">
+                    <label class="small text-muted">股票代號</label>
+                    <input type="text" name="ticker" class="form-control mb-2" value="{{ ticker }}">
+                    
+                    <div class="row g-2 mb-2">
+                        <div class="col-6">
+                            <label class="small text-muted">初始資金</label>
+                            <input type="number" name="init_cash" class="form-control" value="{{ init_cash }}">
+                        </div>
+                        <div class="col-6">
+                            <label class="small text-muted">手續費(折數)</label>
+                            <input type="number" step="0.1" name="discount" class="form-control" value="{{ discount }}" placeholder="10">
+                        </div>
+                    </div>
+
+                    <div class="mb-2">
+                        <label class="small text-muted">下單模式</label>
+                        <select name="trade_mode" id="trade_mode_select" class="form-select mb-1" onchange="toggleMode()">
+                            <option value="all" {% if trade_mode == 'all' %}selected{% endif %}>💰 資金梭哈 (All In)</option>
+                            <option value="fixed" {% if trade_mode == 'fixed' %}selected{% endif %}>🔢 固定股數 (1張/筆)</option>
+                        </select>
+                        
+                        <div id="max_pos_input" class="input-group input-group-sm" style="display: none;">
+                            <span class="input-group-text">最大同時持倉筆數</span>
+                            <input type="number" name="max_pos" class="form-control" value="{{ max_pos }}" min="1">
+                        </div>
+                    </div>
+
+                    <label class="small text-muted d-flex flex-wrap align-items-center mb-1">
+                        回測期間
+                        <div class="ms-auto">
+                            <span class="small text-muted me-1">最近：</span>
+                            <div class="btn-group" role="group">
+                                <button type="button" class="btn btn-outline-secondary btn-period" onclick="setPeriod(6)">半年</button>
+                                <button type="button" class="btn btn-outline-secondary btn-period" onclick="setPeriod(12)">1年</button>
+                                <button type="button" class="btn btn-outline-secondary btn-period" onclick="setPeriod(36)">3年</button>
+                                <button type="button" class="btn btn-outline-secondary btn-period" onclick="setPeriod(60)">5年</button>
+                                <button type="button" class="btn btn-outline-secondary btn-period" onclick="setPeriod(120)">10年</button>
+                            </div>
+                        </div>
+                    </label>
+                    <input type="date" id="start_date" name="start" class="form-control mb-1" value="{{ start_date }}">
+                    <input type="date" id="end_date" name="end" class="form-control mb-3" value="{{ end_date }}">
+                    
+                    <hr>
+                    <label class="fw-bold text-primary">均線 (MA) 參數</label>
+                    <div class="row g-1 mb-2">
+                        <div class="col-4"><input type="number" name="ma1" class="form-control form-control-sm" value="{{ ma1 }}" placeholder="5"></div>
+                        <div class="col-4"><input type="number" name="ma2" class="form-control form-control-sm" value="{{ ma2 }}" placeholder="10"></div>
+                        <div class="col-4"><input type="number" name="ma3" class="form-control form-control-sm" value="{{ ma3 }}" placeholder="20"></div>
+                    </div>
+
+                    <label class="fw-bold text-primary mt-2">MACD 參數</label>
+                    <div class="row g-1 mb-2">
+                        <div class="col-4"><input type="number" name="m_fast" class="form-control form-control-sm" value="{{ macd_fast }}"></div>
+                        <div class="col-4"><input type="number" name="m_slow" class="form-control form-control-sm" value="{{ macd_slow }}"></div>
+                        <div class="col-4"><input type="number" name="m_sig" class="form-control form-control-sm" value="{{ macd_signal }}"></div>
+                    </div>
+
+                    <label class="fw-bold text-danger mt-2">風控 (SL/TP)</label>
+                    <div class="input-group mb-4">
+                        <span class="input-group-text small">SL</span>
+                        <input type="number" step="0.01" name="sl" class="form-control" value="{{ sl_pct }}">
+                        <span class="input-group-text small">TP</span>
+                        <input type="number" step="0.01" name="tp" class="form-control" value="{{ tp_pct }}">
+                    </div>
+
+                    <button class="btn btn-dark w-100 fw-bold shadow-sm">🚀 執行策略</button>
+
+                    <div class="mt-4 pt-3 border-top icon-link-group">
+                        <div class="d-flex justify-content-between gap-2">
+                            <a href="https://www.stockq.org/" target="_blank" class="btn btn-outline-secondary w-100" title="StockQ國際股市" data-bs-toggle="tooltip"><i class="bi bi-globe"></i></a>
+                            <a href="https://www.cnyes.com/" target="_blank" class="btn btn-outline-primary w-100" title="鉅亨網財經" data-bs-toggle="tooltip"><i class="bi bi-graph-up-arrow"></i></a>
+                            <a href="http://www.gamesmomo.com/a.asp?id=3833" target="_blank" class="btn btn-outline-success w-100" title="放鬆一下：憤怒鳥" data-bs-toggle="tooltip"><i class="bi bi-controller"></i></a>
+                            <a href="https://a204996111.github.io/hannah0238/" target="_blank" class="btn btn-outline-danger w-100" title="好康推薦" data-bs-toggle="tooltip"><i class="bi bi-shop"></i></a>
+                        </div>
+                        <div class="text-center mt-2 small text-muted">
+                            實用工具 & 休息一下
+                        </div>
+                    </div>
+
+                </form>
+            </div>
+        </div>
+
+        <div class="col-md-9">
+            
+            <div class="card p-4">
+                <div style="background-color: var(--bg-body); border-left: 5px solid #0d6efd; padding: 15px; border-radius: 4px;">
+                    <h5 style="margin-top: 0; font-weight: bold;">📈 MACD 策略訊號說明</h5>
+                    <div style="display: flex; gap: 20px; flex-wrap: wrap; margin-top: 15px;">
+                        <div style="flex: 1; min-width: 200px; background-color: rgba(220, 53, 69, 0.1); padding: 10px; border-radius: 5px;">
+                            <strong style="color: #dc3545;">🔴 買進訊號 (黃金交叉)</strong>
+                            <ul style="margin: 5px 0 0 20px; color: var(--text-muted); font-size: 0.9rem;">
+                                <li><strong>條件：</strong>DIF (快線) 由下往上突破 DEA (慢線)。</li>
+                            </ul>
+                        </div>
+                        <div style="flex: 1; min-width: 200px; background-color: rgba(25, 135, 84, 0.1); padding: 10px; border-radius: 5px;">
+                            <strong style="color: #198754;">🟢 賣出訊號 (死亡交叉)</strong>
+                            <ul style="margin: 5px 0 0 20px; color: var(--text-muted); font-size: 0.9rem;">
+                                <li><strong>條件：</strong>DIF (快線) 由上往下跌破 DEA (慢線)。</li>
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="row g-3 mb-3">
+                {% for label, key, unit in [('總報酬率', 'return', '%'), ('最大回撤', 'mdd', '%'), ('夏普比率', 'sharpe', ''), ('勝率', 'win_rate', '%'), ('獲利因子', 'pl_ratio', ''), ('交易次數', 'trades', '次')] %}
+                <div class="col-md-4 col-sm-6">
+                    <div class="card p-3 text-center h-100 d-flex justify-content-center flex-column">
+                        <div class="metric-title">{{ label }}</div>
+                        {% if key == 'return' %}
+                            <div class="metric-value" style="color: {{ '#dc3545' if perf.stats[key] > 0 else '#198754' }};">{{ perf.stats[key] }}{{ unit }}</div>
+                        {% else %}
+                            <div class="metric-value">{{ perf.stats[key] }}{{ unit }}</div>
+                        {% endif %}
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+
+            <div class="card p-4">
+                <ul class="nav nav-tabs mb-3" id="mainTab" role="tablist">
+                    <li class="nav-item"><button class="nav-link active" id="chart-tab-btn" data-bs-toggle="tab" data-bs-target="#chart-pane">📊 技術分析</button></li>
+                    <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#equity-pane">💰 資產曲線</button></li>
+                    <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#list-pane">📝 交易明細</button></li>
+                </ul>
+                
+                <div class="tab-content">
+                    <div class="tab-pane fade show active" id="chart-pane" style="position: relative;">
+                        <div id="main-info" class="chart-overlay">
+                            <span style="color: var(--text-muted);">移動滑鼠查看 K線與均線...</span>
+                        </div>
+                        <div id="sub-info" class="chart-overlay">
+                            <span style="color: var(--text-muted);">MACD 指標...</span>
+                        </div>
+                        <div id="mainChart" style="width: 100%; height: 500px;"></div>
+                    </div>
+
+                    <div class="tab-pane fade" id="equity-pane">
+                        <div id="equityEChart" style="width: 100%; height: 500px;"></div>
+                    </div>
+
+                    <div class="tab-pane fade" id="list-pane">
+                        <div class="table-responsive" style="max-height: 500px; overflow-y: auto;">
+                            <table class="table table-hover align-middle small text-nowrap text-center">
+                                <thead class="table-light sticky-top">
+                                    <tr>
+                                        <th>進場日</th><th>進場價</th>
+                                        <th>出場日</th><th>出場價</th>
+                                        <th>持倉天數</th><th>交易成本</th>
+                                        <th>獲利金額</th><th>報酬率</th><th>累計餘額</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {% for trade in perf.trade_list %}
+                                    <tr class="clickable-row" onclick="focusOnTrade('{{ trade.entry_date }}', '{{ trade.exit_date }}')">
+                                        <td>{{ trade.entry_date }}</td><td>{{ trade.entry_price }}</td>
+                                        <td>{{ trade.exit_date }}</td><td>{{ trade.exit_price }}</td>
+                                        <td>{{ trade.duration }}</td>
+                                        <td class="text-muted">{{ trade.cost }}</td>
+                                        <td class="{{ 'text-win' if trade.pl > 0 else 'text-loss' }}">{{ trade.pl }}</td>
+                                        <td class="{{ 'text-win' if trade.return > 0 else 'text-loss' }}">{{ trade.return }}%</td>
+                                        <td class="fw-bold">{{ trade.equity }}</td>
+                                    </tr>
+                                    {% endfor %}
+                                </tbody>
+                            </table>
+                            {% if not perf.trade_list %}<div class="text-center p-4 text-muted">無交易紀錄</div>{% endif %}
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+
+<script>
+    [...document.querySelectorAll('[data-bs-toggle="tooltip"]')].map(el => new bootstrap.Tooltip(el));
+
+    // ★★★ 切換輸入框顯示的 JS ★★★
+    function toggleMode() {
+        const mode = document.getElementById('trade_mode_select').value;
+        const inputDiv = document.getElementById('max_pos_input');
+        if (mode === 'fixed') {
+            inputDiv.style.display = 'flex'; // 顯示
+        } else {
+            inputDiv.style.display = 'none'; // 隱藏
+        }
+    }
+    // 初始化時執行一次
+    toggleMode();
+
+    function toggleTheme() {
+        const body = document.body;
+        const currentTheme = body.getAttribute('data-theme');
+        const newTheme = currentTheme === 'dark' ? 'light' : 'dark';
+        body.setAttribute('data-theme', newTheme);
+        localStorage.setItem('userTheme', newTheme);
+        initCharts(newTheme === 'dark' ? 'dark' : undefined);
+    }
+
+    (function applySavedTheme() {
+        const savedTheme = localStorage.getItem('userTheme');
+        if (savedTheme === 'dark') document.body.setAttribute('data-theme', 'dark');
+    })();
+
+    const dates = {{ perf.time | tojson }};
+    const openData = {{ perf.open | tojson }};
+    const highData = {{ perf.high | tojson }};
+    const lowData = {{ perf.low | tojson }};
+    const closeData = {{ perf.close | tojson }};
+    const klineData = dates.map((d, i) => [openData[i], closeData[i], lowData[i], highData[i]]);
+    
+    const ma1Data = {{ perf.ma1 | tojson }};
+    const ma2Data = {{ perf.ma2 | tojson }};
+    const ma3Data = {{ perf.ma3 | tojson }};
+    const ma1Period = {{ ma1 }};
+    const ma2Period = {{ ma2 }};
+    const ma3Period = {{ ma3 }};
+
+    const macdDif = {{ perf.macd_dif | tojson }};
+    const macdDea = {{ perf.macd_dea | tojson }};
+    const macdHist = {{ perf.macd_hist | tojson }};
+    const equity = {{ perf.stats.equity | tojson }};
+    const tradeMarkers = {{ perf.trade_markers | tojson }};
+
+    const buyPoints = tradeMarkers.filter(t => t.type === 'buy').map(t => [t.date, t.price]);
+    const sellPoints = tradeMarkers.filter(t => t.type === 'sell').map(t => [t.date, t.price]);
+
+    let myChart = null;
+    let equityChart = null;
+
+    function initCharts(theme) {
+        if (myChart != null) myChart.dispose();
+        if (equityChart != null) equityChart.dispose();
+
+        const chartDom = document.getElementById('mainChart');
+        myChart = echarts.init(chartDom, theme);
+        
+        const gridColor = theme === 'dark' ? '#333' : '#e0e0e0';
+        const axisColor = theme === 'dark' ? '#eee' : '#333';
+
+        const option = {
+            tooltip: { trigger: 'axis', axisPointer: { type: 'cross', label: { backgroundColor: '#6a7985' } }, show: false },
+            axisPointer: { link: { xAxisIndex: 'all' } },
+            grid: [
+                { left: '5%', right: '5%', height: '55%' },
+                { left: '5%', right: '5%', top: '72%', height: '18%' }
+            ],
+            xAxis: [
+                { type: 'category', data: dates, gridIndex: 0, axisLine: { lineStyle: { color: axisColor } } },
+                { type: 'category', data: dates, gridIndex: 1, show: false }
+            ],
+            yAxis: [
+                { scale: true, gridIndex: 0, splitLine: { show: true, lineStyle: { type: 'dashed', color: gridColor } } },
+                { scale: true, gridIndex: 1, splitLine: { show: false } }
+            ],
+            dataZoom: [
+                { id: 'dataZoomX', type: 'slider', xAxisIndex: [0, 1], bottom: 0, start: 0, end: 100 },
+                { type: 'inside', xAxisIndex: [0, 1] }
+            ],
+            series: [
+                { 
+                    name: 'K線', type: 'candlestick', data: klineData, 
+                    itemStyle: { color: '#dc3545', color0: '#198754', borderColor: '#dc3545', borderColor0: '#198754' },
+                    markArea: { data: [] }
+                },
+                { name: `MA${ma1Period}`, type: 'line', data: ma1Data, smooth: true, lineStyle: { width: 1, color: '#f39c12' }, showSymbol: false },
+                { name: `MA${ma2Period}`, type: 'line', data: ma2Data, smooth: true, lineStyle: { width: 1, color: '#9b59b6' }, showSymbol: false },
+                { name: `MA${ma3Period}`, type: 'line', data: ma3Data, smooth: true, lineStyle: { width: 1, color: '#3498db' }, showSymbol: false },
+                
+                { name: '買進', type: 'scatter', data: buyPoints, symbol: 'arrow', symbolSize: 15, itemStyle: { color: '#dc3545' }, label: { show: true, formatter: p => p.data[1].toFixed(2), position: 'bottom', color: '#dc3545', fontWeight: 'bold' } },
+                { name: '賣出', type: 'scatter', data: sellPoints, symbol: 'arrow', symbolRotate: 180, symbolSize: 15, itemStyle: { color: '#198754' }, label: { show: true, formatter: p => p.data[1].toFixed(2), position: 'top', color: '#198754', fontWeight: 'bold' } },
+                
+                { name: 'DIF', type: 'line', data: macdDif, xAxisIndex: 1, yAxisIndex: 1, lineStyle: { width: 1.5, color: '#e67e22' }, showSymbol: false },
+                { name: 'DEA', type: 'line', data: macdDea, xAxisIndex: 1, yAxisIndex: 1, lineStyle: { width: 1.5, color: '#0dcaf0' }, showSymbol: false },
+                { name: 'MACD', type: 'bar', data: macdHist, xAxisIndex: 1, yAxisIndex: 1, itemStyle: { color: p => p.value >= 0 ? '#dc3545' : '#198754' } }
+            ]
+        };
+        myChart.setOption(option);
+
+        myChart.getZr().on('mousemove', function(param) {
+            const pointInPixel = [param.offsetX, param.offsetY];
+            if (myChart.containPixel('grid', pointInPixel)) {
+                const xIndex = myChart.convertFromPixel({ seriesIndex: 0 }, pointInPixel)[0];
+                const idx = Math.round(xIndex);
+                if (idx >= 0 && idx < dates.length) updateHeader(idx);
+            }
+        });
+
+        myChart.getZr().on('click', function(param) {
+            if (!param.target) {
+                myChart.setOption({ series: [{ name: 'K線', markArea: { data: [] } }] });
+            }
+        });
+
+        if(dates.length > 0) updateHeader(dates.length - 1);
+
+        const equityDom = document.getElementById('equityEChart');
+        equityChart = echarts.init(equityDom, theme);
+        const equityOption = {
+            tooltip: { trigger: 'axis' },
+            grid: { left: '5%', right: '5%' },
+            xAxis: { type: 'category', data: dates, axisLine: { lineStyle: { color: axisColor } } },
+            yAxis: { scale: true, splitLine: { show: true, lineStyle: { type: 'dashed', color: gridColor } } },
+            dataZoom: [{ type: 'slider', bottom: 0, start: 0, end: 100 }, { type: 'inside' }],
+            series: [{
+                name: '總資產', type: 'line', data: equity, smooth: true,
+                areaStyle: { opacity: 0.1, color: '#dc3545' }, lineStyle: { color: '#dc3545' }, symbol: 'none'
+            }]
+        };
+        equityChart.setOption(equityOption);
+    }
+
+    function updateHeader(i) {
+        const mainDiv = document.getElementById('main-info');
+        const subDiv = document.getElementById('sub-info');
+        const fmt = (n) => n != null ? Number(n).toFixed(2) : '-';
+        const colorHtml = (label, val, color) => 
+            `<span class="info-item"><span style="color:${color}; font-weight:bold;">${label}</span> <span style="color:${color}">${fmt(val)}</span></span>`;
+
+        const o = Number(openData[i]).toFixed(2); 
+        const h = Number(highData[i]).toFixed(2); 
+        const l = Number(lowData[i]).toFixed(2); 
+        const c = Number(closeData[i]).toFixed(2);
+        const color = c >= o ? '#dc3545' : '#198754'; 
+        
+        let mainHtml = `<span class="info-item" style="color:var(--text-main); font-weight:bold;">${dates[i]}</span>`;
+        mainHtml += `<span class="info-item" style="color:${color}">開:${o} 高:${h} 低:${l} 收:${c}</span>`;
+        mainHtml += `<span style="border-left:1px solid #ccc; margin:0 10px;"></span>`;
+        mainHtml += colorHtml(`MA${ma1Period}`, ma1Data[i], '#f39c12');
+        mainHtml += colorHtml(`MA${ma2Period}`, ma2Data[i], '#9b59b6');
+        mainHtml += colorHtml(`MA${ma3Period}`, ma3Data[i], '#3498db');
+        mainDiv.innerHTML = mainHtml;
+
+        let subHtml = colorHtml('DIF', macdDif[i], '#e67e22');
+        subHtml += colorHtml('DEA', macdDea[i], '#0dcaf0');
+        subHtml += colorHtml('HIST', macdHist[i], '#d63384');
+        subDiv.innerHTML = subHtml;
+    }
+
+    function setPeriod(months) {
+        const end = new Date();
+        end.setDate(end.getDate() - 1);
+        const start = new Date(end);
+        start.setMonth(start.getMonth() - months);
+        const fmt = (d) => d.toISOString().split('T')[0];
+        document.getElementById('end_date').value = fmt(end);
+        document.getElementById('start_date').value = fmt(start);
+    }
+
+    function focusOnTrade(entryDate, exitDate) {
+        const chartTabBtn = document.querySelector('#chart-tab-btn');
+        const tabInstance = new bootstrap.Tab(chartTabBtn);
+        tabInstance.show();
+
+        const entryIdx = dates.indexOf(entryDate);
+        const exitIdx = dates.indexOf(exitDate);
+        if (entryIdx === -1) return;
+
+        setTimeout(() => {
+            const total = dates.length;
+            const startIdx = Math.max(0, entryIdx - 20);
+            const endIdx = Math.min(total, exitIdx + 20);
+            const startPct = (startIdx / total) * 100;
+            const endPct = (endIdx / total) * 100;
+            
+            myChart.dispatchAction({ type: 'dataZoom', id: 'dataZoomX', start: startPct, end: endPct });
+            
+            myChart.setOption({
+                series: [{
+                    name: 'K線',
+                    markArea: {
+                        itemStyle: { color: 'rgba(255, 215, 0, 0.2)' },
+                        data: [[{ xAxis: entryDate }, { xAxis: exitDate }]]
+                    }
+                }]
+            });
+            updateHeader(entryIdx);
+        }, 100);
+    }
+
+    const tabEls = document.querySelectorAll('button[data-bs-toggle="tab"]');
+    tabEls.forEach(tabEl => {
+        tabEl.addEventListener('shown.bs.tab', function () { 
+            if(myChart) myChart.resize(); 
+            if(equityChart) equityChart.resize(); 
+        });
+    });
+    window.addEventListener('resize', () => { if(myChart) myChart.resize(); if(equityChart) equityChart.resize(); });
+
+    const savedTheme = localStorage.getItem('userTheme');
+    initCharts(savedTheme === 'dark' ? 'dark' : undefined);
+</script>
+</body>
+</html>
